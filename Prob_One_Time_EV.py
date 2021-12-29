@@ -3,7 +3,7 @@ import cvxpy as cp
 
 class OneTimeEV: # 인자로 유저 수, bn list, sn list
     step_size = 0.001 # Gradient descent step size
-    max_iter = 1000
+    max_iter = 10000
     eps = 1e-10
 
     p_init = 1 # Initial price of the leader
@@ -64,6 +64,8 @@ class OneTimeEV: # 인자로 유저 수, bn list, sn list
         return x
 
     def compute_leader_gradient(self): # and return
+
+        """
         self.print_information()
         ineq_const_value = self.inequality_const_value()
         print(ineq_const_value)
@@ -87,6 +89,7 @@ class OneTimeEV: # 인자로 유저 수, bn list, sn list
             if active_g[i]:
                 print(i)
                 A = np.vstack((A, dyg[i]))
+        print("A", A)
         print(A)
         AAT_inv = np.linalg.inv(A@A.T)
 
@@ -144,13 +147,16 @@ class OneTimeEV: # 인자로 유저 수, bn list, sn list
         H_inv = np.linalg.inv(H)
 
         dy = H_inv@A.T@np.linalg.inv(A@H_inv@A.T)@(A@H_inv@B-C)-H_inv@B
-
+        """
+        dy = - np.divide(np.ones(self.ev_num), np.array(self.sats))
         dxj = 0
         for f in self.followers:
             dxj += f.decision
 
-        dyj = np.zeros((1, 2*self.ev_num+1))
+        #dyj = np.zeros((1, 2*self.ev_num+1))
+        dyj = np.zeros((1, self.ev_num))
         dyj[0, :self.ev_num] = self.leader.decision
+        print(dxj, dyj, dy)
         dj = dxj + dyj@dy
         return dj
 
@@ -187,6 +193,11 @@ class OneTimeEV: # 인자로 유저 수, bn list, sn list
             u[i] = (f.bat - self.leader.decision) * f.decision - 0.5 * f.sat * f.decision**2
         return u
 
+    def leader_optimal(self):
+        s = np.sum(np.divide(np.ones(self.ev_num), self.sats))
+        b = np.sum(np.divide(self.bats, self.sats))
+        print("Optimal Leader Action :", b/(2*s))
+
     def save_data(self, filename):
         np.save(filename, [self.leader_decision_history, self.followers_decision_history])
         return 0
@@ -211,7 +222,7 @@ class Follower:
         self.decision = new_decision
 
 
-prob = OneTimeEV(3, [2, 4, 6], [1, 1.5, 2], 20)
+prob = OneTimeEV(3, [2, 4, 6], [1, 1.5, 2], 5)
 prob.iterations()
-
+prob.leader_optimal()
 
