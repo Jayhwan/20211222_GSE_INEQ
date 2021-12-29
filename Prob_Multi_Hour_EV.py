@@ -2,6 +2,7 @@ import numpy as np
 import cvxpy as cp
 import pickle
 
+
 class MultiHourEV_Parameters:
     def __init__(self, params):
         [users, times, alpha, beta, base_load, p_min, p_max, p_avg, x_mins, x_maxs, require_loads] = params
@@ -279,7 +280,7 @@ n = 0
 for a, b in tlist_24_50:
     xmax[n, a:b] = 2*np.ones(b-a)
     n +=1
-params = [3, 4, 0.02, 0.05, np.array([0.1, 0.2, 0.3, 0]), 0, 2, 1, np.zeros((3, 4)), np.array([[0, 0, 5, 5],[0, 5, 5, 0],[5, 5, 5, 0]]), np.array([3, 2, 4])]
+params = [3, 4, 1, 0.1, np.array([3, 2, 1, 4]), 0, 2, 1, np.zeros((3, 4)), np.array([[5, 0, 5, 0],[5, 0, 0, 5],[5, 5, 0, 0]]), np.array([5, 5, 5])]
 params_24_50 = [50, 24, 1, 0.1, bl_24, 0, 2, 1, xmin, xmax, e_50]
 """prob = MultiHourEV(params_24_50, "test.pkl")
 print(prob.leader_utility_history)
@@ -291,4 +292,4 @@ with open('test.pkl', 'rb') as f:
 print(prob.leader_utility_history)"""
 #prob.iterations()
 #prob2 = MultiHourEV(params)
-#prob2.prox_iterations()
+#prob2.iterations()

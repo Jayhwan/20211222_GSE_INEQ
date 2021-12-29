@@ -1,6 +1,7 @@
 import numpy as np
 import cvxpy as cp
 
+
 class OneTimeEV: # 인자로 유저 수, bn list, sn list
     step_size = 0.001 # Gradient descent step size
     max_iter = 10000
