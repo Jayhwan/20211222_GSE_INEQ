@@ -67,7 +67,7 @@ class MultiHourEV(MultiHourEV_Parameters):
             x_next = x_proj.value
             for i in range(self.ev_num):
                 self.followers[i].update(x_next[i])
-            if iter%200 == 0:
+            if (iter+1)%200 == 0:
                 print("ITER", iter+1, "VE GAP :", np.sqrt(np.sum(np.power(x_cur - x_next, 2))))
             if np.sqrt(np.sum(np.power(x_cur - x_next, 2))) <= self.ve_eps and iter >= 1000-1 :
                 break
