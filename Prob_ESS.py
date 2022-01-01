@@ -1,76 +1,120 @@
 import numpy as np
 import cvxpy as cp
 import pickle
-
+import matplotlib.pyplot as plt
 
 class EET_Parameters:
     def __init__(self, params):
-        [users, times, alpha, beta, base_load, p_min, p_max, p_avg, x_mins, x_maxs, require_loads] = params
-        self.ev_num = users
+        [active_users, passive_users, times, alpha, beta_s, beta_b, q_max, q_init, c_max, c_min, grid_price, tax, soh, active_require_loads, passive_require_loads] = params
+        self.active_num = active_users
+        self.passive_num = passive_users
         self.time = times
-        self.grid_alpha = alpha
-        self.grid_beta = beta
-        self.grid_load = base_load
-        self.p_min = p_min
-        self.p_max = p_max
-        self.p_avg = p_avg
-        self.evs_min = x_mins
-        self.evs_max = x_maxs
-        self.evs_load = require_loads
+        self.alpha = alpha
+        self.beta_s = beta_s
+        self.beta_b = beta_b
+        self.q_max = q_max
+        self.q_init = q_init
+        self.c_max = c_max
+        self.c_min = c_min
+        self.grid_price = grid_price
+        self.tax = tax
+        self.soh = soh
+        self.active_load = active_require_loads # active user x times
+        self.passive_load = np.maximum(passive_require_loads, np.zeros((self.passive_num, self.time))) # passive user x times
 
 
 class EET_Game(EET_Parameters):
-    step_size = 0.1 # Gradient descent step size
+    step_size = 0.001 # Gradient descent step size
     max_iter = 10000
     eps = 1e-10
-    ve_step_size = 0.1
-    ve_max_iter = 1000
-    ve_eps = 1e-6
+    ve_step_size = 10
+    ve_max_iter = 100000
+    ve_eps = 1e-10
     active_epsilon = 1e-6
     prox_gamma = 10
     prox_eps = 1e-6
     prox_max_iter = 10000
 
-    followers = []
+    active_followers = []
+    passive_followers = []
     leader_decision_history = []
     followers_decision_history = []
     leader_utility_history = []
 
     def __init__(self, params, filename=None):
         super().__init__(params)
-        self.p_init = self.p_avg*np.ones(self.time)  # Initial price of the leader
-        self.x_init = np.multiply(np.divide(self.evs_max.T, np.sum(self.evs_max, axis=1)), self.evs_load).T
-        self.leader = Leader(self.p_init, self.p_min, self.p_max, self.p_avg)
+        self.p_init = np.kron(np.array([[1], [2]]), np.ones(self.time))  # Initial price of the leader
+        self.x_init = np.zeros((self.active_num, 2, self.time)) # Initial action of the followers
+        self.leader = Leader(self.p_init)
         self.filename = filename
-        for i in range(self.ev_num):
-            self.followers += [Follower(self.x_init[i], self.evs_min[i], self.evs_max[i], self.evs_load[i])]
+        for i in range(self.active_num):
+            self.active_followers += [Follower(self.x_init[i], self.active_load[i], True)]
+        for i in range(self.passive_num):
+            self.passive_followers += [Follower(np.zeros((2, self.time)), self.passive_load[i], False)]
 
     def compute_followers_ve(self): # and return
         print("VE")
-        x_cur = np.zeros((self.ev_num, self.time))
-        for i in range(self.ev_num):
-            x_cur[i] = self.followers[i].decision
+        x_cur = np.zeros((self.active_num, 2, self.time))
+
+        x_s_cur = np.zeros((self.active_num, self.time))
+        x_b_cur = np.zeros((self.active_num, self.time))
+        l_cur = np.zeros((self.active_num, self.time))
+        l_passive = np.zeros((self.passive_num, self.time))
+        for i in range(self.active_num):
+            x_s_cur[i] = self.active_followers[i].x_s
+            x_b_cur[i] = self.active_followers[i].x_b
+            l_cur[i] = self.active_followers[i].l
+
+        for i in range(self.passive_num):
+            l_passive[i] = self.passive_followers[i].l
+
         p = self.leader.decision
+
+        x_cur[:, 0, :] = x_s_cur
+        x_cur[:, 1, :] = x_b_cur
         x_next = x_cur
+
         for iter in range(self.ve_max_iter):
             #print("x_cur :", np.sum(x_cur, axis=0))
-            Fx = self.grid_beta*x_cur+np.kron(np.ones((self.ev_num, 1)), self.grid_alpha*np.ones(self.time)+self.grid_beta*(self.grid_load+np.sum(x_cur, axis=0))+p)
-            # print("Fx :", Fx)
+            Fx = np.zeros((self.active_num, 2, self.time))
+            Fx[:, 0, :] = -np.kron(np.ones((self.active_num, 1)), p[0]) + self.grid_price*(np.kron(np.ones((self.active_num, 1)), np.sum(l_cur, axis=0)+np.sum(l_passive, axis=0))+l_cur) + \
+                          self.soh*(np.kron(np.ones((self.active_num, 1)), np.sum(x_s_cur, axis=0))+x_s_cur) # grid price가 시간마다 다를 경우 고려 x된 implementation
+            Fx[:, 1, :] = np.kron(np.ones((self.active_num, 1)), p[1]) - self.grid_price * (
+                        np.kron(np.ones((self.active_num, 1)),
+                                np.sum(l_cur, axis=0) + np.sum(l_passive, axis=0)) + l_cur) + \
+                          self.soh * (np.kron(np.ones((self.active_num, 1)), np.sum(x_b_cur,
+                                                                                    axis=0)) + x_b_cur)  # grid price가 시간마다 다를 경우 고려 x된 implementation
             x_next = x_cur - self.ve_step_size * Fx
 
-            x_proj = cp.Variable((self.ev_num, self.time))
-            obj = cp.Minimize(cp.sum(cp.power(x_next - x_proj, 2)))
+            x_s_proj = cp.Variable((self.active_num, self.time))
+            x_b_proj = cp.Variable((self.active_num, self.time))
+            obj = cp.Minimize(cp.sum(cp.power(x_next[:, 0, :] - x_s_proj, 2) + cp.power(x_next[:, 1, :] - x_b_proj, 2)))
+            ess_matrix = np.fromfunction(np.vectorize(lambda a, b: 0 if a < b else np.power(self.alpha, a - b)),
+                                         (self.time, self.time), dtype=float)
+            ess_init_vector = self.alpha * ess_matrix[:, 0]
+
+            q_ess = self.q_init * ess_init_vector + ess_matrix @ (self.beta_s*cp.sum(x_s_proj, axis=0) - self.beta_b*cp.sum(x_b_proj, axis=0))
+
             const = []
-            const += [self.evs_min <= x_proj, x_proj <= self.evs_max, cp.sum(x_proj, axis=1) == self.evs_load]
+            const += [q_ess >= 0, q_ess <= self.q_max]
+            const += [cp.sum(x_s_proj, axis=0) <= self.c_max, cp.sum(x_b_proj, axis=0) <= self.c_min]
+            const += [x_s_proj >= 0, x_b_proj >= 0, x_s_proj - x_b_proj + self.active_load >= 0]
             prob = cp.Problem(obj, const)
             result = prob.solve(solver='ECOS')
-            x_next = x_proj.value
-            for i in range(self.ev_num):
-                self.followers[i].update(x_next[i])
-            if iter%200 == 0:
+
+            x_s_next = x_s_proj.value
+            x_b_next = x_b_proj.value
+            l_next = x_s_next - x_b_next + self.active_load
+            x_next[:, 0, :] = x_s_next
+            x_next[:, 1, :] = x_b_next
+
+            for i in range(self.active_num):
+                self.active_followers[i].update(x_next[i])
+            if (iter+1)%200 == 0:
                 print("ITER", iter+1, "VE GAP :", np.sqrt(np.sum(np.power(x_cur - x_next, 2))))
             if np.sqrt(np.sum(np.power(x_cur - x_next, 2))) <= self.ve_eps and iter >= 1000-1 :
                 break
+
             x_cur = x_next
         self.print_information()
         print("VE Done")
@@ -79,51 +123,107 @@ class EET_Game(EET_Parameters):
     def print_information(self):
         print("Leader Decision :", self.leader.decision)
         print("Leader Utility  :", self.leader_utility())
+        l_cur = np.zeros((self.active_num, self.time))
+        l_passive = np.zeros((self.passive_num, self.time))
+        for i in range(self.active_num):
+            l_cur[i] = self.active_followers[i].l
+
+        for i in range(self.passive_num):
+            l_passive[i] = self.passive_followers[i].l
+        grid_load = np.sum(l_cur, axis=0) + np.sum(l_passive, axis=0)
+        print("PAR :", np.max(grid_load)/np.average(grid_load))
+        plt.figure()
+        plt.plot(grid_load)
+        plt.show()
         print()
-        x = []
-        for f in self.followers:
-            x += [f.decision]
-        for i in range(self.ev_num):
-            continue#print("EVs Decison     :", x[i])
+        #x = []
+        #for f in self.active_followers:
+        #    x += [f.decision]
+        #for i in range(self.ev_num):
+        #    continue#print("EVs Decison     :", x[i])
 
     def inequality_const_value(self):
-        v = np.zeros((4, self.time, self.ev_num))
-        for i in range(self.ev_num):
-            v[0, :, i] = - self.followers[i].decision + self.evs_min[i]
-            v[1, :, i] = self.followers[i].decision - self.evs_max[i]
-            v[2, :, i] = np.ones(self.time) - v[0, :, i]
-            v[3, :, i] = np.ones(self.time) - v[1, :, i]
-        return v
+        v_t_g = np.zeros((6, self.time))
+        v_t_lamb = np.zeros((6, self.time))
+        v_nt_g = np.zeros((3, self.time, self.active_num))
+        v_nt_lamb = np.zeros((3, self.time, self.active_num))
+
+        x_s_cur = np.zeros((self.active_num, self.time))
+        x_b_cur = np.zeros((self.active_num, self.time))
+        l_cur = np.zeros((self.active_num, self.time))
+        for i in range(self.active_num):
+            x_s_cur[i] = self.active_followers[i].x_s
+            x_b_cur[i] = self.active_followers[i].x_b
+            l_cur[i] = self.active_followers[i].l
+
+        ess_matrix = np.fromfunction(np.vectorize(lambda a, b: 0 if a < b else np.power(self.alpha, a - b)),
+                                     (self.time, self.time), dtype=float)
+        ess_init_vector = self.alpha * ess_matrix[:, 0]
+        q_ess = self.q_init * ess_init_vector + ess_matrix @ (
+                    self.beta_s * np.sum(x_s_cur, axis=0) - self.beta_b * np.sum(x_b_cur, axis=0))
+
+        v_t_g[0, :] = - q_ess
+        v_t_g[1, :] = q_ess - self.q_max * np.ones(self.time)
+        v_t_g[2, :] = - np.sum(x_s_cur, axis=0)
+        v_t_g[3, :] = np.sum(x_s_cur, axis=0) - self.c_max * np.ones(self.time)
+        v_t_g[4, :] = - np.sum(x_b_cur, axis=0)
+        v_t_g[5, :] = np.sum(x_b_cur, axis=0) - self.c_min * np.ones(self.time)
+
+        v_nt_g[0, :, :] = - x_s_cur.T
+        v_nt_g[1, :, :] = - x_b_cur.T
+        v_nt_g[2, :, :] = - l_cur.T
+
+        f = lambda x: np.abs(x) <= self.active_epsilon
+
+        v_t_lamb += f(v_t_g)
+        v_nt_lamb += f(v_nt_g)
+
+        return [v_t_g, v_nt_g, v_t_lamb, v_nt_lamb]
 
     def is_active_inequality_const(self):
-        v = self.inequality_const_value()
+        [v_t_g, v_nt_g, v_t_lamb, v_nt_lamb] = self.inequality_const_value()
         f = lambda x: np.abs(x) <= self.active_epsilon
-        active = f(v).reshape(-1)
+        active = np.hstack((f(v_t_g).reshape(-1), f(v_nt_g).reshape(-1), f(v_t_lamb).reshape(-1), f(v_nt_lamb).reshape(-1)))
+        #print("ACTIVE", len(active))
+        #print(np.sum(active))
+        #print(active)
         return active
 
     def compute_leader_gradient(self): # and return
         print("Gradient")
         active = self.is_active_inequality_const()
-        Dxh = np.kron(np.vstack((np.eye(self.time), np.zeros(self.time))), np.ones((self.ev_num, 1)))
-        Dxg = np.zeros((np.sum(active), self.time))
-        Dxh_wave = np.vstack((Dxh, Dxg))
+        Dxh = np.zeros((self.time*(6+5*self.active_num), 2*self.time))
+        Dxh[:2*self.time*self.active_num, :] = np.kron(np.kron(np.array([[-1, 0], [0, 1]]), np.eye(self.time)), np.ones((self.active_num, 1)))
 
-        Dyh = np.zeros((self.ev_num*(self.time+1), self.ev_num*(3*self.time+1)))
-        Dyh[:self.ev_num*self.time, :self.ev_num*self.time] = self.grid_beta*np.kron(np.eye(self.time), np.ones((self.ev_num, self.ev_num))+np.eye(self.ev_num))
-        Dyh[self.ev_num*self.time:, :self.ev_num*self.time] = np.kron(np.ones(self.time), np.eye(self.ev_num))
-        Dyh[:self.ev_num*self.time, self.ev_num*self.time:3*self.ev_num*self.time] = np.concatenate((-np.eye(self.ev_num*self.time), np.eye(self.ev_num*self.time)), axis=1)
-        Dyh[:self.ev_num*self.time, 3*self.ev_num*self.time:] = np.kron(np.ones((self.time, 1)), np.eye(self.ev_num))
+        Dxh_wave = Dxh
+        print(Dxh_wave.shape)
 
-        Dyg = np.zeros((4*self.ev_num*self.time, self.ev_num*(3*self.time+1)))
-        Dyg[:, :3*self.ev_num*self.time] = np.kron(np.array([[-1,0,0],[1,0,0],[0,-1,0],[0,0,1]]), np.eye(self.ev_num*self.time))
+        help_matrix = np.fromfunction(np.vectorize(lambda a, b: 0 if a > b else np.power(self.alpha, b-a)),
+                                     (self.time, self.time), dtype=float)
 
+        Dyh = np.zeros((2*self.active_num*self.time, self.time*(6+5*self.active_num)))
+        Dyh[:, :2*self.active_num*self.time] = np.kron(np.kron(np.array([[self.grid_price + self.soh, -self.grid_price], [-self.grid_price, self.grid_price + self.soh]]),
+                                                       np.eye(self.time)), np.ones((self.active_num, self.active_num))+np.eye(self.active_num))
+        Dyh[:, 2*self.active_num*self.time:2*self.active_num*self.time+2*self.time] = np.kron(np.array([[-self.beta_s, self.beta_s], [self.beta_b, -self.beta_b]]),
+                                                                                              np.kron(help_matrix, np.ones((self.active_num, 1))))
+        Dyh[:, 2 * self.active_num * self.time + 2 * self.time : 2 * self.active_num * self.time + 6 * self.time] = np.kron(np.array([[-1, 1, 0, 0], [0, 0, -1, 1]]),
+                                                                                                                            np.kron(np.eye(self.time), np.ones((self.active_num, 1))))
+        Dyh[:, 2 * self.active_num * self.time + 6 * self.time:] = np.kron(np.array([[-1, 0, -1], [0, -1, 1]]), np.eye(self.time*self.active_num))
+
+        Dyg = np.zeros((2*self.time*(6+3*self.active_num), self.time*(6+5*self.active_num)))
+        Dyg[self.time*(6+3*self.active_num):, 2*self.time*self.active_num:] = - np.eye(self.time*(6+3*self.active_num))
+        Dyg[:2*self.time, :2*self.time*self.active_num] = np.kron(np.array([[self.beta_s, -self.beta_b], [-self.beta_s, self.beta_b]]),
+                                                                  np.kron(help_matrix.T, np.ones(self.active_num)))
+        Dyg[2 * self.time: 6* self.time, :2 * self.time * self.active_num] = np.kron(np.array([[-1,0],[1,0],[0,-1],[0,1]]),
+                                                                                     np.kron(np.eye(self.time), np.ones(self.active_num)))
+        Dyg[6 * self.time:self.time*(6+3*self.active_num), :2 * self.time * self.active_num] = np.kron(np.array([[-1, 0], [0, -1], [1, -1]]),
+                                                                                                       np.eye(self.time*self.active_num))
         Dyh_wave = Dyh
-        #print(active)
         for i in range(len(active)):
             if active[i]:
                 Dyh_wave = np.vstack((Dyh_wave, Dyg[i]))
 
-        Dy_var = cp.Variable((self.ev_num*(3*self.time+1), self.time))
+        Dy_var = cp.Variable((self.time*(6+5*self.active_num), 2*self.time))
         #print("SHAPE :", Dxh_wave.shape, Dyh_wave.shape, Dy_var.shape)
         obj = cp.Minimize(1)
         const = [Dyh_wave@Dy_var + Dxh_wave == 0]
@@ -131,13 +231,22 @@ class EET_Game(EET_Parameters):
         result = prob.solve(solver='ECOS')
         dy = Dy_var.value
 
-        dxj = np.zeros(self.time)
-        for ev in self.followers:
-            dxj += ev.decision
+        p = self.leader.decision
 
-        dyj = np.zeros(self.ev_num*(3*self.time+1))
-        dyj[:self.ev_num*self.time] = np.kron(self.leader.decision, np.ones(self.ev_num))
-        dj = dxj + dyj@dy
+        dxj = - 2 * self.tax * p.reshape(-1)
+
+        l_cur = np.zeros((self.active_num, self.time))
+        l_passive = np.zeros((self.passive_num, self.time))
+        for i in range(self.active_num):
+            l_cur[i] = self.active_followers[i].l
+
+        for i in range(self.passive_num):
+            l_passive[i] = self.passive_followers[i].l
+
+        grid_load = np.sum(l_cur, axis=0) + np.sum(l_passive, axis=0)
+        dyj = np.kron(np.array([1, -1]), -2*self.grid_price*np.kron(grid_load, np.ones(self.active_num)))
+        print("DyJ :", dyj)
+        dj = dxj + dyj@dy[:2*self.time*self.active_num, :]
         print("DJ :", dj)
         return dj
 
@@ -146,8 +255,8 @@ class EET_Game(EET_Parameters):
         ve = self.compute_followers_ve()
         self.followers_decision_history += [ve]
         self.leader_utility_history += [self.leader_utility()]
-        for i in range(self.ev_num):
-            self.followers[i].update(ve[i])
+        #for i in range(self.active_num):
+        #    self.active_followers[i].update(ve[i])
         grad = self.compute_leader_gradient()
         self.leader.update(grad, self.step_size)
         next_leader_decision = self.leader.decision
@@ -164,23 +273,41 @@ class EET_Game(EET_Parameters):
         return 0
 
     def leader_utility(self):
-        s = 0
-        for t in range(self.time):
-            st = 0
-            for i in range(self.ev_num):
-                st += self.followers[i].decision[t]
-            s += self.leader.decision[t]*st
-        return s
+        l_cur = np.zeros((self.active_num, self.time))
+        l_passive = np.zeros((self.passive_num, self.time))
+        for i in range(self.active_num):
+            l_cur[i] = self.active_followers[i].l
+
+        for i in range(self.passive_num):
+            l_passive[i] = self.passive_followers[i].l
+
+        grid_load = np.sum(l_cur, axis=0) + np.sum(l_passive, axis=0)
+        u = - self.grid_price * np.sum(np.power(grid_load, 2)) - self.tax * np.sum(np.power(self.leader.decision, 2))
+        return u
 
     def followers_utility(self):
-        x = np.zeros((self.ev_num, self.time))
-        for i in range(self.ev_num):
-            x[i] = self.followers[i].decision
+        x_s = np.zeros((self.active_num, self.time))
+        x_b = np.zeros((self.active_num, self.time))
+        l = np.zeros((self.active_num, self.time))
+        l_passive = np.zeros((self.passive_num, self.time))
+        for i in range(self.active_num):
+            x_s[i] = self.active_followers[i].x_s
+            x_b[i] = self.active_followers[i].x_b
+            l[i] = self.active_followers[i].l
 
-        u = np.zeros(self.ev_num)
-        for i in range(self.ev_num):
-            u[i] = np.sum(np.multiply(self.grid_alpha*np.ones(self.time)+self.grid_beta*(self.grid_load+np.sum(x, axis=0))+self.leader.decision, x[i]))
-        return u
+        for i in range(self.passive_num):
+            l_passive[i] = self.passive_followers[i].l
+
+        p_s = self.leader.decision[0]
+        p_b = self.leader.decision[1]
+
+        c = np.zeros(self.active_num) # cost
+        for i in range(self.active_num):
+            c[i] += np.sum(np.multiply(p_b, x_b)-np.multiply(p_s, x_s))
+            c[i] += self.grid_price*np.sum(np.multiply(l[i], np.sum(l, axis=0) + np.sum(l_passive, axis=0)))
+            c[i] += self.soh * np.sum(np.multiply(x_s, np.sum(x_s, axis=0)) + np.multiply(x_b, np.sum(x_b, axis=0)))
+
+        return -c
 
     def save_data(self):
         if self.filename is not None:
@@ -190,29 +317,79 @@ class EET_Game(EET_Parameters):
 
     def prox_one_iteration(self):
         self.leader_decision_history += [self.leader.decision]
-        x = np.zeros((self.ev_num, self.time))
-        for i in range(self.ev_num):
-            x[i] = self.followers[i].decision
+        x_s = np.zeros((self.active_num, self.time))
+        x_b = np.zeros((self.active_num, self.time))
+        l = np.zeros((self.active_num, self.time))
+        l_passive = np.zeros((self.passive_num, self.time))
+        for i in range(self.active_num):
+            x_s[i] = self.active_followers[i].x_s
+            x_b[i] = self.active_followers[i].x_b
+            l[i] = self.active_followers[i].l
+
+        for i in range(self.passive_num):
+            l_passive[i] = self.passive_followers[i].l
+
+        x = np.zeros((self.active_num, 2, self.time))
+        x[:, 0, :] = x_s
+        x[:, 1, :] = x_b
 
         self.followers_decision_history += [x]
         self.leader_utility_history += [self.leader_utility()]
         x_prev = x
         p_prev = self.leader.decision
-        p_var = cp.Variable(self.time)
-        obj = cp.Maximize(cp.sum(cp.multiply(p_var, np.sum(x, axis=0))) - self.prox_gamma/2*cp.sum(cp.power(p_prev - p_var, 2)))
-        const = [self.p_min*np.ones(self.time) <= p_var, p_var <= self.p_max*np.ones(self.time), cp.sum(p_var) == self.time*self.p_avg]
+
+        p_var = cp.Variable((2, self.time))
+        obj = cp.Maximize(- self.tax * cp.sum(cp.power(p_var, 2)) - self.prox_gamma/2*cp.sum(cp.power(p_prev - p_var, 2))) # CONSTANT 부분은 없앰
+
+        const = [p_var[0] <= p_var[1]]
         prob = cp.Problem(obj, const)
         result = prob.solve(solver='ECOS')
         self.leader.decision = p_var.value
-        for i in range(self.ev_num):
-            x_var = cp.Variable(self.time)
-            coef = self.grid_alpha*np.ones(self.time)+self.grid_beta*self.grid_load+self.leader.decision+self.grid_beta*(np.sum(x, axis=0)-x[i])
-            obj = cp.Minimize(cp.sum(self.grid_beta*cp.power(x_var, 2)+cp.multiply(coef, x_var)) + self.prox_gamma/2*cp.sum(cp.power(x_var - x[i], 2)))
-            const = [self.evs_min[i] <= x_var, x_var <= self.evs_max[i], cp.sum(x_var) == self.evs_load[i]]
+
+        for i in range(self.active_num):
+            x_s = np.zeros((self.active_num, self.time))
+            x_b = np.zeros((self.active_num, self.time))
+            l = np.zeros((self.active_num, self.time))
+            l_passive = np.zeros((self.passive_num, self.time))
+            for i in range(self.active_num):
+                x_s[i] = self.active_followers[i].x_s
+                x_b[i] = self.active_followers[i].x_b
+                l[i] = self.active_followers[i].l
+
+            for i in range(self.passive_num):
+                l_passive[i] = self.passive_followers[i].l
+
+            p_s = self.leader.decision[0]
+            p_b = self.leader.decision[1]
+
+            x_s_var = cp.Variable(self.time)
+            x_b_var = cp.Variable(self.time)
+            l_var = cp.Variable(self.time)
+            grid_load_except_i = np.sum(l, axis=0) + np.sum(l_passive, axis=0) - l[i]
+            x_s_sum_except_i = np.sum(x_s, axis=0) - x_s[i]
+            x_b_sum_except_i = np.sum(x_b, axis=0) - x_b[i]
+            obj = cp.Minimize(cp.sum(cp.multiply(p_b,x_b_var)) - cp.sum(cp.multiply(p_s,x_s_var)) + self.grid_price * (cp.sum(cp.power(l_var, 2)+cp.multiply(grid_load_except_i, l_var)))
+                              + self.soh * (cp.sum(cp.power(x_s_var, 2) + cp.multiply(x_s_sum_except_i,x_s_var)+cp.power(x_b_var, 2) + cp.multiply(x_b_sum_except_i,x_b_var)))
+                              + self.prox_gamma/2*cp.sum(cp.power(x_s_var - x[i, 0, :], 2)+cp.power(x_b_var - x[i, 1, :], 2)))
+
+            ess_matrix = np.fromfunction(np.vectorize(lambda a, b: 0 if a < b else np.power(self.alpha, a - b)),
+                                         (self.time, self.time), dtype=float)
+            ess_init_vector = self.alpha * ess_matrix[:, 0]
+            print(ess_matrix.shape)
+            print(cp.sum(x_s_sum_except_i + x_s_var, axis=0))
+            q_ess = self.q_init * ess_init_vector + ess_matrix @ (self.beta_s * (x_s_sum_except_i + x_s_var) - self.beta_b * (x_b_sum_except_i + x_b_var))
+
+            const = [x_s_var >= 0, x_b_var >= 0, l_var >= 0]
+            const += [x_s_sum_except_i + x_s_var <= self.c_max]
+            const += [x_b_sum_except_i + x_b_var <= self.c_min]
+            const += [q_ess >= 0, q_ess <= self.q_max]
             prob = cp.Problem(obj, const)
             result = prob.solve(solver='ECOS')
-            x[i] = x_var.value
-            self.followers[i].decision = x_var.value
+
+            new = np.zeros((2, self.time))
+            new[0, :] = x_s_var.value
+            new[1, :] = x_b_var.value
+            self.active_followers[i].update(new)
         diff = np.sqrt(np.sum(np.power(self.leader.decision - p_prev, 2) + np.power(x_prev - x, 2)))
         return diff
 
@@ -228,24 +405,21 @@ class EET_Game(EET_Parameters):
                 break
         ve = self.compute_followers_ve()
         self.followers_decision_history += [ve]
-        for i in range(self.ev_num):
-            self.followers[i].update(ve[i])
+        for i in range(self.active_num):
+            self.active_followers[i].update(ve[i])
         return 0
 
 
 class Leader:
-    def __init__(self, initial_price, p_min, p_max, p_avg):
+    def __init__(self, initial_price):
         self.decision = initial_price
-        self.p_min = p_min
-        self.p_max = p_max
-        self.p_avg = p_avg
-        self.time = len(self.decision)
+        self.time = self.decision.shape[-1]
 
     def update(self, gradient, step_size):
-        self.decision = self.decision + step_size * gradient
-        p = cp.Variable(self.time)
+        self.decision = self.decision + step_size * gradient.reshape(2, -1)
+        p = cp.Variable((2, self.time))
         obj = cp.Minimize(cp.sum(cp.power(p - self.decision, 2)))
-        const = [self.p_min*np.ones(self.time) <= p, p <= self.p_max*np.ones(self.time), cp.sum(p) == self.time * self.p_avg]
+        const = [p[0] <= p[1]]
         prob = cp.Problem(obj, const)
         result = prob.solve(solver='ECOS')
         self.decision = p.value
@@ -253,11 +427,16 @@ class Leader:
 
 
 class Follower:
-    def __init__(self, initial_charging, x_min, x_max, require_load):
+    def __init__(self, initial_charging, require_load, is_active):
+        self.is_active = is_active
         self.decision = initial_charging
-        self.ev_min = x_min
-        self.ev_max = x_max
-        self.ev_load = require_load
+        self.require_load = require_load
+        self.x_s = self.decision[0]
+        self.x_b = self.decision[1]
+        self.l = self.x_s - self.x_b + self.require_load
 
     def update(self, new_decision):
         self.decision = new_decision
+        self.x_s = self.decision[0]
+        self.x_b = self.decision[1]
+        self.l = self.x_s - self.x_b + self.require_load
