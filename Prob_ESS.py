@@ -24,12 +24,13 @@ class EET_Parameters:
 
 
 class EET_Game(EET_Parameters):
-    step_size = 0.001 # Gradient descent step size
+    step_size = 0.1 # Gradient descent step size
     max_iter = 10000
     eps = 1e-10
-    ve_step_size = 10
-    ve_max_iter = 100000
-    ve_eps = 1e-10
+    ve_step_size = 0.0001
+    ve_max_iter = 10000
+    ve_eps = 1e-6
+    approx_ve_eps = 1
     active_epsilon = 1e-6
     prox_gamma = 10
     prox_eps = 1e-6
@@ -45,6 +46,7 @@ class EET_Game(EET_Parameters):
         super().__init__(params)
         self.p_init = np.kron(np.array([[1], [2]]), np.ones(self.time))  # Initial price of the leader
         self.x_init = np.zeros((self.active_num, 2, self.time)) # Initial action of the followers
+        self.x_init[:, 0, :] = -np.minimum(np.zeros((self.active_num, self.time)), self.active_load)
         self.leader = Leader(self.p_init)
         self.filename = filename
         for i in range(self.active_num):
@@ -101,6 +103,7 @@ class EET_Game(EET_Parameters):
             const += [x_s_proj >= 0, x_b_proj >= 0, x_s_proj - x_b_proj + self.active_load >= 0]
             prob = cp.Problem(obj, const)
             result = prob.solve(solver='ECOS')
+            #print("SOC :", q_ess.value)
 
             x_s_next = x_s_proj.value
             x_b_next = x_b_proj.value
@@ -115,6 +118,37 @@ class EET_Game(EET_Parameters):
             if np.sqrt(np.sum(np.power(x_cur - x_next, 2))) <= self.ve_eps and iter >= 1000-1 :
                 break
 
+            x_s_check = cp.Variable((self.active_num, self.time))
+            x_b_check = cp.Variable((self.active_num, self.time))
+            Fx = np.zeros((self.active_num, 2, self.time))
+            Fx[:, 0, :] = -np.kron(np.ones((self.active_num, 1)), p[0]) + self.grid_price * (
+                        np.kron(np.ones((self.active_num, 1)),
+                                np.sum(l_next, axis=0) + np.sum(l_passive, axis=0)) + l_next) + \
+                          self.soh * (np.kron(np.ones((self.active_num, 1)), np.sum(x_s_next,
+                                                                                    axis=0)) + x_s_next)  # grid price가 시간마다 다를 경우 고려 x된 implementation
+            Fx[:, 1, :] = np.kron(np.ones((self.active_num, 1)), p[1]) - self.grid_price * (
+                    np.kron(np.ones((self.active_num, 1)),
+                            np.sum(l_next, axis=0) + np.sum(l_passive, axis=0)) + l_next) + \
+                          self.soh * (np.kron(np.ones((self.active_num, 1)), np.sum(x_b_next,
+                                                                                    axis=0)) + x_b_next)  # grid price가 시간마다 다를 경우 고려 x된 implementation
+
+            obj = cp.Minimize(cp.sum(cp.multiply(Fx[:, 0, :], x_s_check - x_s_next) + cp.multiply(Fx[:, 1, :], x_b_check - x_b_next)))
+            ess_matrix = np.fromfunction(np.vectorize(lambda a, b: 0 if a < b else np.power(self.alpha, a - b)),
+                                         (self.time, self.time), dtype=float)
+            ess_init_vector = self.alpha * ess_matrix[:, 0]
+
+            q_ess_check = self.q_init * ess_init_vector + ess_matrix @ (
+                        self.beta_s * cp.sum(x_s_check, axis=0) - self.beta_b * cp.sum(x_b_check, axis=0))
+
+            const = []
+            const += [q_ess_check >= 0, q_ess_check <= self.q_max]
+            const += [cp.sum(x_s_check, axis=0) <= self.c_max, cp.sum(x_b_check, axis=0) <= self.c_min]
+            const += [x_s_check >= 0, x_b_check >= 0, x_s_check - x_b_check + self.active_load >= 0]
+            prob = cp.Problem(obj, const)
+            result = prob.solve(solver='ECOS')
+            print("VE CHECKING :", result)
+            if abs(result) < self.approx_ve_eps:
+                break
             x_cur = x_next
         self.print_information()
         print("VE Done")
