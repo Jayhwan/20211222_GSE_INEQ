@@ -20,7 +20,7 @@ class MultiHourEV_Parameters:
 
 
 class MultiHourEV(MultiHourEV_Parameters):
-    step_size = 0.1 # Gradient descent step size
+    step_size = 0.05 # Gradient descent step size
     max_iter = 10000
     eps = 1e-10
     ve_step_size = 0.1
@@ -65,8 +65,8 @@ class MultiHourEV(MultiHourEV_Parameters):
             prob = cp.Problem(obj, const)
             result = prob.solve(solver='ECOS')
             x_next = x_proj.value
-            for i in range(self.ev_num):
-                self.followers[i].update(x_next[i])
+            #for i in range(self.ev_num):
+            #    self.followers[i].update(x_next[i])
             if (iter+1)%200 == 0:
                 print("ITER", iter+1, "VE GAP :", np.sqrt(np.sum(np.power(x_cur - x_next, 2))))
             if np.sqrt(np.sum(np.power(x_cur - x_next, 2))) <= self.ve_eps and iter >= 1000-1 :
@@ -79,6 +79,7 @@ class MultiHourEV(MultiHourEV_Parameters):
     def print_information(self):
         print("Leader Decision :", self.leader.decision)
         print("Leader Utility  :", self.leader_utility())
+        print("Step size       :", self.step_size)
         print()
         x = []
         for f in self.followers:
@@ -89,10 +90,13 @@ class MultiHourEV(MultiHourEV_Parameters):
     def inequality_const_value(self):
         v = np.zeros((4, self.time, self.ev_num))
         for i in range(self.ev_num):
+
             v[0, :, i] = - self.followers[i].decision + self.evs_min[i]
             v[1, :, i] = self.followers[i].decision - self.evs_max[i]
-            v[2, :, i] = np.ones(self.time) - v[0, :, i]
-            v[3, :, i] = np.ones(self.time) - v[1, :, i]
+            f = lambda x: np.abs(x) <= self.active_epsilon
+
+            v[2, :, i] = f(v[0, :, i])#np.ones(self.time) - v[0, :, i]
+            v[3, :, i] = f(v[1, :, i])#np.ones(self.time) - v[1, :, i]
         return v
 
     def is_active_inequality_const(self):
@@ -126,6 +130,8 @@ class MultiHourEV(MultiHourEV_Parameters):
         Dy_var = cp.Variable((self.ev_num*(3*self.time+1), self.time))
         #print("SHAPE :", Dxh_wave.shape, Dyh_wave.shape, Dy_var.shape)
         obj = cp.Minimize(1)
+        #print("Shape :", Dyh_wave.shape)
+        #print("Rank  :", np.linalg.matrix_rank(Dyh_wave))
         const = [Dyh_wave@Dy_var + Dxh_wave == 0]
         prob = cp.Problem(obj, const)
         result = prob.solve(solver='ECOS')
@@ -143,7 +149,21 @@ class MultiHourEV(MultiHourEV_Parameters):
 
     def one_iteration(self): # 현재의 leader action에 대해서 follower들의 ve를 구한 후 gradient를 구해서 leader update
         self.leader_decision_history += [self.leader.decision]
+        if len(self.leader_utility_history) == 0:
+            prev_util = -9999
+        else:
+            prev_util = self.leader_utility_history[-1]
+
         ve = self.compute_followers_ve()
+        cur_util = self.leader_utility()
+
+        while prev_util > cur_util:
+            self.step_size *= 0.1
+            ve = self.compute_followers_ve()
+            cur_util = self.leader_utility()
+            if self.step_size < 1e-8:
+                return 0 # Fisnish
+
         self.followers_decision_history += [ve]
         self.leader_utility_history += [self.leader_utility()]
         for i in range(self.ev_num):
