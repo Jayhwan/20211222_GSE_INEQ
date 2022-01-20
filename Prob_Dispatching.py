@@ -1,19 +1,25 @@
 import numpy as np
 import cvxpy as cp
 import pickle
+import matplotlib.pyplot as plt
 
 
 class Dispatching_Parameters:
     def __init__(self, params):
-        [users, stations, evs_loc, stations_loc, p_min, p_max, target_evs, require_loads] = params
-        self.evs = users
-        self.stations = stations
-        self.evs_loc = evs_loc
-        self.sts_loc = stations_loc
-        self.p_min = p_min
-        self.p_max = p_max
-        self.target_evs = target_evs
-        self.evs_load = require_loads
+        [users, stations, evs_loc, stations_loc, p_min, p_max, target_evs, require_loads, weight] = params
+        self.evs = users # number of evs
+        self.stations = stations # number of stations
+        self.evs_loc = evs_loc # location of evs (list of numpy array)
+        self.sts_loc = stations_loc # location of stations (list of numpy array)
+        self.p_min = p_min # minimum price
+        self.p_max = p_max # maximum price
+        self.target_evs = target_evs # target number of evs in each station (list of numbers) len sts
+        self.evs_load = require_loads # require energy of evs (list of numbers) len evs
+        self.weight = weight #
+        self.distance_matrix = np.zeros((self.evs, self.stations)) # i,j represent distance between ev i and station j
+        for i in range(self.evs):
+            for j in range(self.stations):
+                self.distance_matrix[i, j] = np.sqrt(np.power(self.evs_loc[i] - self.sts_loc[j], 2))
 
 
 class Leader:
@@ -50,6 +56,18 @@ class Follower:
         self.load = require_load
         self.distances = distances
 
+    def update(self, next_decision):
+        self.decision = next_decision
+
+
+class History:
+    def __init__(self):
+        self.leader_decision_history = []
+        self.leader_utility_history = []
+        self.followers_decision_history = []
+        self.followers_utility_history = []
+
+
 class Dispatching(Dispatching_Parameters):
     step_size = 0.05
     max_iter = 10000
@@ -60,13 +78,48 @@ class Dispatching(Dispatching_Parameters):
     active_epsilon = 1e-6
 
     followers = []
-    leader_decision_history = []
-    followers_decision_history = []
-    leader_utility_history = []
-    followers_utility_history = []
+    grad_history = History()
+    baseline_1_history = History()
+    baseline_2_history = History()
 
     def __init__(self, params, filename=None):
         super().__init__(params)
         self.p_init = (self.p_min + self.p_max)/2 * np.ones(self.stations)
-        self.x_init = np.ones((self.evs, self.stations))
-        self.
+        self.x_init = np.ones((self.evs, self.stations))/self.stations
+        self.leader = Leader(self.p_init, self.p_min, self.p_max, self.target_evs, self.stations, self.sts_loc)
+        self.filename = filename
+        for i in range(self.evs):
+            self.followers += [Follower(self.x_init[i], self.distance_matrix[i], self.evs_load[i])]
+
+    def draw_map(self):
+        plt.figure()
+        marker_size = 5
+        for ev_loc in self.evs_loc:
+            plt.plot(ev_loc, marker='o', marker_size=marker_size, color = 'r')
+        for st_loc in self.sts_loc:
+            plt.plot(st_loc, marker='o', marker_size=marker_size, color = 'k')
+        plt.show()
+
+    def followers_action(self):
+        action = np.zeros((self.evs, self.stations))
+        for i in range(self.evs):
+            action[i] = self.followers[i].decision
+        return action
+
+    def leader_utility(self):
+        dest = self.followers_action()
+        obj = np.sum(np.power(self.target_evs - np.sum(dest, axis=0)))
+        return -obj
+
+    def waiting_time(self):
+        t
+
+
+    def followers_utility(self):
+        [a,b,c] = self.weight
+        dest = self.followers_action()
+        objs = np.zeros(self.evs)
+        for i in range(self.evs):
+            objs[i] = a*dest[i]@self.distance_matrix[i].T + b*self.evs_load[i]*dest[i]@self.leader.decision.T\
+                      + c*
+
