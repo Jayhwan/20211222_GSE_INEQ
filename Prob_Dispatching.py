@@ -50,6 +50,7 @@ class Follower:
         self.load = require_load
         self.distances = distances
 
+
 class Dispatching(Dispatching_Parameters):
     step_size = 0.05
     max_iter = 10000
@@ -69,4 +70,11 @@ class Dispatching(Dispatching_Parameters):
         super().__init__(params)
         self.p_init = (self.p_min + self.p_max)/2 * np.ones(self.stations)
         self.x_init = np.ones((self.evs, self.stations))
-        self.
+        for i in range(self.evs):
+            self.followers += [Follower(self.x_init[i], self.evs_load[i], )]
+
+    def compute_followers_ve(self):
+        print("VE")
+        x_cur = np.zeros((self.evs, self.stations))
+        for i in range(self.evs):
+            x_cur[i] = self.followers[i].decision
