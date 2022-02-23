@@ -144,19 +144,30 @@ plt.xlabel("Iteration", fontsize=14)
 plt.ylabel("Leader Objective", fontsize=14)
 plt.show()
 
-g = []
-h = []
-p = []
-ev = 20
-for i in range(80):
-    g += [prob.grad_history.followers_utility_history[i][ev]]
-    h += [prob.heur_history.followers_utility_history[i][ev]]
-    p += [prob.prox_history.followers_utility_history[i][ev]]
-
+g = np.zeros((prob.evs, 80))
+h = np.zeros((prob.evs, 80))
+p = np.zeros((prob.evs, 80))
+avg_g = np.zeros((80))
+avg_h = np.zeros((80))
+avg_p = np.zeros((80))
+#ev = 20
+for ev in range(prob.evs):
+    for i in range(80):
+        g[ev][i] = prob.grad_history.followers_utility_history[i][ev]
+        h[ev][i] = prob.heur_history.followers_utility_history[i][ev]
+        p[ev][i] = prob.prox_history.followers_utility_history[i][ev]
+avg_g = np.sum(g, axis=0)/prob.evs
+avg_h = np.sum(h, axis=0)/prob.evs
+avg_p = np.sum(p, axis=0)/prob.evs
 plt.figure()
-plt.plot(g,color='tab:red', label='Gradient Algorithm')
-plt.plot(h,color='tab:blue', label='Heuristic Algorithm')
-plt.plot(p,color='tab:green', label='Proximal Algorithm')
+#for ev in range(prob.evs):
+#    plt.plot(g[ev],color='tab:red', label='Gradient Algorithm')
+#    plt.plot(h[ev],color='tab:blue', label='Heuristic Algorithm')
+#    plt.plot(p[ev],color='tab:green', label='Proximal Algorithm')
+
+plt.plot(avg_g,color='tab:red', ls='--', label='Average Gradient Algorithm')
+plt.plot(avg_h,color='tab:blue', ls='--', label='Average Heuristic Algorithm')
+plt.plot(avg_p,color='tab:green', ls='--', label='Average Proximal Algorithm')
 plt.legend()
 plt.xticks(fontsize=14)
 plt.yticks(fontsize=14)
