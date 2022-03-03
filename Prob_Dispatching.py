@@ -70,12 +70,29 @@ class History:
         self.followers_decision_history = []
         self.followers_utility_history = []
         self.updated_cnt = 0
+        self.time_history = []
+
+    def update(self, leader_action, leader_utility, follower_action, follower_utility, time_hist):
+        self.leader_decision_history += [leader_action]
+        self.leader_utility_history += [leader_utility]
+        self.followers_decision_history += [follower_action]
+        self.followers_utility_history += [follower_utility]
+        self.updated_cnt += 1
+        self.time_history += [time_hist]
+
+    def initialize(self):
+        self.leader_decision_history = []
+        self.leader_utility_history = []
+        self.followers_decision_history = []
+        self.followers_utility_history = []
+        self.updated_cnt = 0
+        self.time_history = []
 
 
 class Dispatching(DispatchingParameters):
     grad_step_size = 1
-    grad_max_iter = 10000
-    grad_eps = 1e-6
+    grad_max_iter = 100
+    grad_eps = 1e-4
 
     ve_step_size = 0.01
     ve_max_iter = 100000
@@ -87,7 +104,7 @@ class Dispatching(DispatchingParameters):
 
     heur_beta = 0.1
     heur_eps = 1e-6
-    heur_max_iter = 1000
+    heur_max_iter = 100
 
     followers = []
     grad_history = History()
@@ -102,27 +119,6 @@ class Dispatching(DispatchingParameters):
         self.filename = filename
         for i in range(self.evs):
             self.followers += [Follower(self.x_init[i], self.evs_load[i], self.distance_matrix[i], self.evs_priority[i])]
-
-    def update_grad_history(self, leader_action, leader_utility, follower_action, follower_utility):
-        self.grad_history.leader_decision_history += [leader_action]
-        self.grad_history.leader_utility_history += [leader_utility]
-        self.grad_history.followers_decision_history += [follower_action]
-        self.grad_history.followers_utility_history += [follower_utility]
-        self.grad_history.updated_cnt += 1
-
-    def update_heur_history(self, leader_action, leader_utility, follower_action, follower_utility):
-        self.heur_history.leader_decision_history += [leader_action]
-        self.heur_history.leader_utility_history += [leader_utility]
-        self.heur_history.followers_decision_history += [follower_action]
-        self.heur_history.followers_utility_history += [follower_utility]
-        self.heur_history.updated_cnt += 1
-
-    def update_prox_history(self, leader_action, leader_utility, follower_action, follower_utility):
-        self.prox_history.leader_decision_history += [leader_action]
-        self.prox_history.leader_utility_history += [leader_utility]
-        self.prox_history.followers_decision_history += [follower_action]
-        self.prox_history.followers_utility_history += [follower_utility]
-        self.prox_history.updated_cnt += 1
 
     def draw_map(self):
         plt.figure()
@@ -311,9 +307,11 @@ class Dispatching(DispatchingParameters):
         #print(Dyh_wave.shape, Dxh_wave.shape)
 
         s = time.time()
+        eps = 1e-5
         Dy_var = cp.Variable((3*m*n+2*m+n, m))
         obj = cp.Minimize(1)
-        const = [Dyh_wave@Dy_var + Dxh_wave == 0]
+        const = [Dyh_wave@Dy_var + Dxh_wave <= eps]
+        const = [Dyh_wave @ Dy_var + Dxh_wave >= -eps]
         prob = cp.Problem(obj, const)
         result = prob.solve(solver='ECOS')
         #print(prob.status)
@@ -339,9 +337,8 @@ class Dispatching(DispatchingParameters):
         print("VE TIME :", e-s)
         self.update_followers(x)
         #print(len(self.grad_history.leader_decision_history))
-        self.update_grad_history(self.leader_action(), self.leader_utility(), self.followers_action(),
-                                 self.followers_utility())
-        self.save_data()
+        #self.update_grad_history(self.leader_action(), self.leader_utility(), self.followers_action(),
+        #                         self.followers_utility())
         #print(len(self.grad_history.leader_decision_history))
         p_prev = self.leader_action()
         s2 = time.time()
@@ -349,10 +346,16 @@ class Dispatching(DispatchingParameters):
         e2 = time.time()
         b = e2-s2
         print("Grad TIME :", e2-s2)
+        if len(self.grad_history.time_history) == 0:
+            self.grad_history.update(self.leader_action(), self.leader_utility(), self.followers_action(), self.followers_utility(), a+b)
+        else:
+            self.grad_history.update(self.leader_action(), self.leader_utility(), self.followers_action(), self.followers_utility(), a + b - self.grad_history.time_history[-1])
+        self.save_data()
         self.leader.update_grad(grad, self.grad_step_size)
-        diff = np.sqrt(np.sum(np.power(self.leader_action() - p_prev, 2)))
+        diff1 = np.sqrt(np.sum(np.power(self.leader_action() - p_prev, 2)))
+        diff2 = np.sqrt(np.sum(np.power(grad, 2)))
         print("Sum Time :", a+b)
-        return diff
+        return diff1, diff2
 
     def grad_iterations(self):
         if self.grad_history.updated_cnt:
@@ -366,12 +369,12 @@ class Dispatching(DispatchingParameters):
             print("Already", self.grad_history.updated_cnt, "iteration progressed")
             print("Grad Iteration :", i+1)
             self.print_information()
-            diff = self.grad_one_iteration()
+            diff1, diff2 = self.grad_one_iteration()
 
-            if np.abs(diff < self.grad_eps) and i > 10:
+            if (np.abs(diff1 < self.grad_eps) or np.abs(diff2 < self.grad_eps))and i > 10:
                 #self.save_data()
                 print("Grad Iteration Over")
-                print("diff :", np.abs(diff), "smaller than eps :", self.grad_eps)
+                print("grad diff :", np.abs(diff1), "action diff :", np.abs(diff2), "smaller than eps :", self.grad_eps)
                 break
             #if i % 1 == 0:
             #    print("diff :", diff)
@@ -390,6 +393,7 @@ class Dispatching(DispatchingParameters):
         p_next = p_prev + update
         p_next = np.maximum(p_next, self.p_min * np.ones(self.stations))
         p_next = np.minimum(p_next, self.p_max * np.ones(self.stations))
+        self.heur_beta *= 0.95
         return p_next
 
     def heur_iterations(self):
@@ -407,7 +411,7 @@ class Dispatching(DispatchingParameters):
             next_p = self.heur_one_iteration()
             diff = np.sqrt(np.sum(np.power(self.leader_action() - next_p, 2)))
 
-            self.update_heur_history(self.leader_action(), self.leader_utility(), self.followers_action(), self.followers_utility())
+            self.heur_history.update(self.leader_action(), self.leader_utility(), self.followers_action(), self.followers_utility(), 0)
             self.save_data()
             self.leader.update_direct(next_p)
 
@@ -466,14 +470,16 @@ class Dispatching(DispatchingParameters):
             self.update_followers(self.prox_history.followers_decision_history[-1])
         else:
             self.initialize_action()
-            self.update_prox_history(self.leader_action(), self.leader_utility(), self.followers_action(),
-                                     self.followers_utility())
+            self.prox_history.update(self.leader_action(), self.leader_utility(), self.followers_action(),
+                                     self.followers_utility(), 0)
+        s = time.time()
         for i in range(self.prox_max_iter):
             print("Already", self.prox_history.updated_cnt, "iteration progressed")
             print("Prox Iteration :", i+1)
             self.print_information()
             diff = self.prox_one_iteration()
-            self.update_prox_history(self.leader_action(), self.leader_utility(), self.followers_action(), self.followers_utility())
+            c = time.time()
+            self.prox_history.update(self.leader_action(), self.leader_utility(), self.followers_action(), self.followers_utility(), c-s)
             self.save_data()
             if i % 1 == 0:
                 print("diff :", diff)
@@ -481,7 +487,7 @@ class Dispatching(DispatchingParameters):
             if np.abs(diff) < self.prox_eps:
                 print("Prox Iteration Over")
                 print("diff :", np.abs(diff), "smaller than eps :", self.prox_eps)
-                break
+                return 0
         print("Prox Maximum Iteration over")
         self.save_data()
         return 0
